@@ -1,0 +1,5 @@
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY target/release/controller /usr/local/bin/controller
+COPY target/release/consumer /usr/local/bin/consumer
+ENTRYPOINT ["/usr/local/bin/controller"]

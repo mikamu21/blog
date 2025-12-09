@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: search-controller
+  namespace: default
+  labels:
+    app: search-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: search-controller
+  template:
+    metadata:
+      labels:
+        app: search-controller
+    spec:
+      serviceAccountName: search-controller
+      containers:
+        - name: controller
+          image: search-controller:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: MEILISEARCH_URL
+              value: http://meilisearch.meilisearch.svc.cluster.local:7700
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"

@@ -1,0 +1,24 @@
+apiVersion: stratum.dev/v1
+kind: SearchIndex
+metadata:
+  name: products
+spec:
+  kafka:
+    partitions: 3
+    replicas: 1
+    retentionMs: 86400000
+  connector:
+    batchSize: 100
+    batchTimeoutMs: 1000
+  index:
+    primaryKey: id
+    fields:
+      - name: title
+        searchable: true
+      - name: description
+        searchable: true
+      - name: price
+        filterable: true
+        sortable: true
+      - name: category
+        filterable: true

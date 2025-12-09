@@ -1,0 +1,162 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: searchindexes.stratum.dev
+spec:
+  group: stratum.dev
+  names:
+    categories: []
+    kind: SearchIndex
+    plural: searchindexes
+    shortNames: []
+    singular: searchindex
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.kafkaTopic
+      name: Topic
+      type: string
+    - jsonPath: .status.meilisearchIndex
+      name: Index
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for SearchIndexSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              connector:
+                default:
+                  batchSize: 100
+                  batchTimeoutMs: 1000
+                description: Connector (consumer) configuration
+                properties:
+                  batchSize:
+                    default: 100
+                    description: Number of documents to batch before flushing to Meilisearch
+                    format: uint
+                    minimum: 0.0
+                    type: integer
+                  batchTimeoutMs:
+                    default: 1000
+                    description: Timeout in milliseconds before flushing partial batch
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                type: object
+              index:
+                description: Search index configuration
+                properties:
+                  fields:
+                    description: Field definitions for the search index
+                    items:
+                      description: Field specification for search index
+                      properties:
+                        filterable:
+                          default: false
+                          type: boolean
+                        name:
+                          type: string
+                        searchable:
+                          default: false
+                          type: boolean
+                        sortable:
+                          default: false
+                          type: boolean
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  primaryKey:
+                    description: Primary key field (defaults to "id")
+                    nullable: true
+                    type: string
+                required:
+                - fields
+                type: object
+              kafka:
+                default:
+                  partitions: 0
+                  replicas: 0
+                description: Kafka topic configuration
+                properties:
+                  clusterName:
+                    description: Strimzi cluster name (defaults to "my-cluster")
+                    nullable: true
+                    type: string
+                  partitions:
+                    default: 1
+                    description: Number of partitions for the Kafka topic
+                    format: int32
+                    type: integer
+                  replicas:
+                    default: 1
+                    description: Number of replicas for the Kafka topic
+                    format: int32
+                    type: integer
+                  retentionMs:
+                    description: Topic retention in milliseconds (defaults to 7200000 = 2 hours)
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+            required:
+            - index
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              consumerReady:
+                description: Whether the connector/consumer is ready
+                nullable: true
+                type: boolean
+              kafkaTopic:
+                description: Name of the created Kafka topic
+                nullable: true
+                type: string
+              meilisearchIndex:
+                description: Name of the created Meilisearch index
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: SearchIndex
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

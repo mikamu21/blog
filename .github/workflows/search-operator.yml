@@ -1,0 +1,136 @@
+name: Search Controller E2E Tests
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "search-controller/**"
+      - "stratum-kafka/**"
+      - ".github/workflows/search-operator.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "search-controller/**"
+      - "stratum-kafka/**"
+      - ".github/workflows/search-operator.yml"
+  workflow_dispatch:
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  test:
+    name: Run E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache apt packages
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: libssl-dev libsasl2-dev cmake
+          version: 1.0
+
+      - name: Check formatting
+        run: |
+          cargo fmt --check --manifest-path search-controller/Cargo.toml
+          cargo fmt --check --manifest-path stratum-kafka/Cargo.toml
+
+      - name: Build and infrastructure (parallel)
+        run: |
+          # Start Terraform in background
+          (
+            cd search-controller/terraform
+            terraform init
+            terraform apply -auto-approve
+          ) > /tmp/terraform.log 2>&1 &
+          TF_PID=$!
+
+          # Build binaries and run clippy while Terraform runs (sccache caches this)
+          cargo build --release -p search-controller --bin controller --bin consumer
+          cargo clippy --release -p search-controller -p stratum-kafka --all-targets -- -D warnings
+
+          # Wait for Terraform
+          if ! wait $TF_PID; then
+            echo "::error::Terraform failed"
+            cat /tmp/terraform.log
+            exit 1
+          fi
+          echo "Terraform completed successfully"
+
+      - name: Build Docker image
+        run: docker build -t search-controller:latest -f search-controller/Dockerfile.ci .
+
+      - name: Wait for services
+        run: |
+          kubectl cluster-info --context kind-search-operator
+
+          # Wait for pods in parallel
+          kubectl wait --for=condition=ready pod -l strimzi.io/cluster=my-cluster -n kafka --timeout=300s &
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=meilisearch -n meilisearch --timeout=180s &
+          wait
+
+          # Wait for NodePorts
+          for i in {1..30}; do
+            timeout 2 bash -c "echo > /dev/tcp/localhost/30092" 2>/dev/null && echo "Kafka accessible" && break
+            sleep 2
+          done
+          for i in {1..30}; do
+            curl -s http://localhost:30700/health | grep -q available && echo "Meilisearch healthy" && break
+            sleep 2
+          done
+
+      - name: Deploy controller
+        working-directory: search-controller
+        run: |
+          kind load docker-image search-controller:latest --name search-operator
+          cargo run --release --bin crdgen | kubectl apply -f -
+          kubectl apply -f manifests/rbac/
+          kubectl apply -f manifests/deployment.yaml
+          kubectl wait --for=condition=available deployment/search-controller -n default --timeout=120s
+          kubectl logs -l app=search-controller --tail=5
+
+      - name: Run E2E tests
+        working-directory: search-controller
+        run: cargo test --release --test search_e2e -- --nocapture
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Terraform Log ===" && cat /tmp/terraform.log || true
+          echo "=== Controller ===" && kubectl logs -l app=search-controller --tail=50 || true
+          echo "=== Kafka ===" && kubectl logs -n kafka my-cluster-broker-0 -c kafka --tail=30 || true
+          echo "=== Meilisearch ===" && kubectl logs -n meilisearch -l app.kubernetes.io/name=meilisearch --tail=30 || true
+          echo "=== Resources ===" && kubectl get searchindexes,kafkatopics -A || true
