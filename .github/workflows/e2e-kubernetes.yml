@@ -1,0 +1,143 @@
+name: E2E Kubernetes Tests
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "e2e-kubernetes/**"
+      - ".github/workflows/e2e-kubernetes.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "e2e-kubernetes/**"
+      - ".github/workflows/e2e-kubernetes.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: e2e-kubernetes
+
+jobs:
+  test:
+    name: Run E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            e2e-kubernetes/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('e2e-kubernetes/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install system dependencies
+        run: |
+          # Optimize apt installation by disabling unnecessary triggers (saves ~40s)
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo sed -i 's/yes/no/g' /etc/initramfs-tools/update-initramfs.conf
+
+          # Install rdkafka dependencies
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libsasl2-dev cmake
+
+      - name: Verify Docker is running
+        run: docker ps
+
+      - name: Terraform Init
+        working-directory: e2e-kubernetes/terraform
+        run: terraform init
+
+      - name: Terraform Format Check
+        working-directory: e2e-kubernetes/terraform
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        working-directory: e2e-kubernetes/terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: e2e-kubernetes/terraform
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: e2e-kubernetes/terraform
+        run: |
+          terraform apply -auto-approve tfplan
+
+      - name: Verify Cluster
+        run: |
+          # Show cluster info
+          kubectl cluster-info --context kind-e2e-test
+
+          # Show all resources in kafka namespace
+          kubectl get all -n kafka
+
+          # Wait for Kafka to be ready
+          echo "Waiting for Kafka pods to be ready..."
+          kubectl wait --for=condition=ready pod -l strimzi.io/cluster=my-cluster -n kafka --timeout=300s
+
+          # Wait for NodePort service to be accessible
+          echo "Waiting for Kafka to be accessible on localhost:30092..."
+          for i in {1..30}; do
+            if timeout 2 bash -c "echo > /dev/tcp/localhost/30092" 2>/dev/null; then
+              echo "✓ Kafka is accessible"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "✗ Kafka not accessible after 30 attempts"
+              echo "Checking docker port mappings..."
+              docker ps | grep e2e-test
+              docker port e2e-test-control-plane
+              exit 1
+            fi
+            echo "Attempt $i/30: waiting..."
+            sleep 2
+          done
+
+      - name: Check Code Formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy and Tests
+        run: |
+          # Clippy compiles everything including tests
+          cargo clippy --all-targets -- -D warnings
+          # Tests reuse the compiled artifacts from clippy
+          cargo test --test kafka_e2e -- --nocapture
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Kafka Pods ==="
+          kubectl get pods -n kafka -o wide || true
+
+          echo "=== Kafka Topics ==="
+          kubectl get kafkatopics -n kafka || true
+
+          echo "=== Strimzi Operator Logs ==="
+          kubectl logs -n kafka -l strimzi.io/kind=cluster-operator --tail=50 || true
+
+          echo "=== Kafka Broker Logs ==="
+          kubectl logs -n kafka my-cluster-broker-0 -c kafka --tail=50 || true
